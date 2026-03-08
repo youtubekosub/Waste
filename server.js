@@ -33,14 +33,21 @@ const rewriteResources = (content, targetUrl, contentType) => {
         const urlObj = new URL(targetUrl);
 
         // 1. <base>タグを挿入して相対パスの基準をターゲットドメインに固定
-        // これによりJSやCSSの動的読み込みがブラウザ側で解決しやすくなります
         $('head').prepend(`<base href="${urlObj.origin}${urlObj.pathname}">`);
+        
+        // ゲーム用にCanvasを全画面表示にするスタイルを強制注入
+        $('head').append(`
+            <style>
+                body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+                canvas { display: block; width: 100vw; height: 100vh; }
+            </style>
+        `);
 
-        // 2. a, img, link, script 等のURL属性を修正
-        $('a, img, link, script, source, iframe').each((i, el) => {
+        // 2. a, img, link, script 等のURL属性を修正（絶対パス化）
+        $('a, img, link, script, source, iframe, form').each((i, el) => {
             ['href', 'src', 'action'].forEach(attr => {
                 const val = $(el).attr(attr);
-                if (val && !val.startsWith('data:') && !val.startsWith('#')) {
+                if (val && !val.startsWith('data:') && !val.startsWith('#') && !val.startsWith('javascript:')) {
                     try {
                         $(el).attr(attr, new URL(val, targetUrl).href);
                     } catch (e) {}
@@ -54,9 +61,9 @@ const rewriteResources = (content, targetUrl, contentType) => {
             $(el).text(rewriteCSS(css, targetUrl));
         });
 
-        // 4. GitHubなどの厳しいセキュリティポリシー(CSP)を解除
-        $('meta[http-equiv="Content-Security-Policy"]').remove();
-        $('meta[http-equiv="content-security-policy"]').remove();
+        // 4. セキュリティポリシー(CSP)およびフレーム制限の解除
+        $('meta[http-equiv*="Content-Security-Policy" i]').remove();
+        $('meta[name*="viewport"]').attr('content', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no');
 
         return $.html();
     }
@@ -78,7 +85,8 @@ wss.on('connection', (ws) => {
         try {
             const decrypted = transform(msg).toString();
             const { url, method, headers, data } = JSON.parse(decrypted);
-            const host = new URL(url).hostname;
+            const urlObj = new URL(url);
+            const host = urlObj.hostname;
 
             const res = await axios({
                 url,
@@ -88,7 +96,8 @@ wss.on('connection', (ws) => {
                     ...headers,
                     'Cookie': jar.get(host) || '',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                    'Referer': url
+                    'Referer': url,
+                    'Origin': urlObj.origin
                 },
                 responseType: 'arraybuffer',
                 validateStatus: false
@@ -101,11 +110,13 @@ wss.on('connection', (ws) => {
             let bodyData = res.data;
             const contentType = res.headers['content-type'] || '';
 
-            // HTMLまたはCSSの場合に内部パスを書き換えて規制を回避
+            // ゲーム用リソース（WASMやバイナリ）は書き換えずにそのまま送る
+            // HTMLまたはCSSの場合のみリライトを実行
             if (contentType.includes('text/html') || contentType.includes('text/css')) {
                 bodyData = Buffer.from(rewriteResources(bodyData.toString(), url, contentType));
             }
 
+            // バイナリ整合性を守るためBase64で送信
             ws.send(transform(JSON.stringify({
                 body: bodyData.toString('base64'),
                 status: res.status,
